@@ -167,6 +167,24 @@ TRUE = ((st.Metacritic × Reviews) + st.Letterboxd + Global_Max + Global_Min + s
 
 ---
 
+## Syncing the updated file back to Movies.xlsx
+
+After reviewing `Movies_updated.xlsx`, make it the new baseline so the next run builds on top of it (preserving `StableWeeks`, `LastUpdated`, and any scores already fetched):
+
+```bash
+# Optional: keep a backup of the original
+cp Movies.xlsx Movies_backup.xlsx
+
+# Promote the updated file
+cp Movies_updated.xlsx Movies.xlsx
+```
+
+The next `python update_scores.py` will then read from the promoted file. If you're using `--smart-update`, the stability counters carry over correctly.
+
+> **Note:** close the file in Excel before copying — the `~$Movies_updated.xlsx` lock file means Excel still has it open.
+
+---
+
 ## How it works
 
 The script runs a three-pass pipeline to ensure normalisation is always column-wide:
