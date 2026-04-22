@@ -587,6 +587,15 @@ EXPECTED_HEADERS = [
     "LastUpdated", "StableWeeks",
 ]
 
+# These two columns must live inside Table1 so that sorting the table in Excel
+# keeps them aligned with their movie rows.
+_TABLE_NAME = "Table1"
+_TABLE_CORE_COLS = [
+    "Movies", "Metacritic", "st.Metacritic", "Reviews",
+    "Letterboxd", "st.Letterboxd", "IMDB", "st.IMDB", "TRUE",
+    "LastUpdated", "StableWeeks",
+]
+
 # Column mapping: workbook column name -> NormalisedScores field name
 SCORE_COLUMN_MAP = {
     "Metacritic": "metascore",
@@ -629,12 +638,140 @@ def ensure_headers(ws, header_map: dict) -> dict:
     return header_map
 
 
+def migrate_stability_columns(ws, header_map: dict) -> dict:
+    """
+    Move LastUpdated and StableWeeks into the columns immediately after TRUE
+    so they fall inside Table1 and sort with the rest of the data.
+
+    If they are already adjacent to TRUE (or TRUE is not present), this is a
+    no-op.  When a migration is needed the old cells are cleared after copying.
+    """
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.table import TableColumn
+
+    true_col = header_map.get("TRUE")
+    lu_col = header_map.get("LastUpdated")
+    sw_col = header_map.get("StableWeeks")
+
+    if true_col is None or lu_col is None or sw_col is None:
+        return header_map
+
+    target_lu = true_col + 1
+    target_sw = true_col + 2
+
+    # Already in the right place — nothing to do
+    if lu_col == target_lu and sw_col == target_sw:
+        return header_map
+
+    max_row = ws.max_row
+
+    # Update the Table1 definition first so openpyxl does not regenerate
+    # the old header cells from the stale tableColumns list on save.
+    table = ws.tables.get(_TABLE_NAME)
+    if table is not None:
+        new_ref = f"A1:{get_column_letter(target_sw)}{max_row}"
+        table.ref = new_ref
+        # Rebuild tableColumns: keep existing ones up to TRUE, then add the
+        # two stability columns at their new positions.
+        existing = {c.name: c for c in table.tableColumns}
+        new_cols = []
+        for col_name in _TABLE_CORE_COLS:
+            if col_name in existing:
+                new_cols.append(existing[col_name])
+            else:
+                col_idx = header_map.get(col_name) or (
+                    target_lu if col_name == "LastUpdated" else target_sw
+                )
+                new_cols.append(TableColumn(id=col_idx, name=col_name))
+        table.tableColumns = new_cols
+
+    # Copy LastUpdated values to target column
+    if lu_col != target_lu:
+        ws.cell(row=1, column=target_lu, value="LastUpdated")
+        for r in range(2, max_row + 1):
+            ws.cell(row=r, column=target_lu, value=ws.cell(row=r, column=lu_col).value)
+        # Clear old column — must use .value = None (ws.cell(..., value=None) is a no-op)
+        for r in range(1, max_row + 1):
+            ws.cell(row=r, column=lu_col).value = None
+        header_map["LastUpdated"] = target_lu
+
+    # Copy StableWeeks values to target column
+    if sw_col != target_sw:
+        ws.cell(row=1, column=target_sw, value="StableWeeks")
+        for r in range(2, max_row + 1):
+            ws.cell(row=r, column=target_sw, value=ws.cell(row=r, column=sw_col).value)
+        # Clear old column — must use .value = None (ws.cell(..., value=None) is a no-op)
+        for r in range(1, max_row + 1):
+            ws.cell(row=r, column=sw_col).value = None
+        header_map["StableWeeks"] = target_sw
+
+    logger.info(
+        "Migrated LastUpdated/StableWeeks to cols %d/%d (inside Table1)",
+        target_lu, target_sw,
+    )
+    return header_map
+
+
+def extend_table_to_stability_cols(ws) -> None:
+    """
+    Ensure Table1's ref covers LastUpdated and StableWeeks.
+
+    migrate_stability_columns already updates the table when a migration is
+    needed.  This function handles the case where the columns are already in
+    the correct position but the table ref is stale (e.g. the row count
+    changed).
+    """
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.table import TableColumn
+
+    table = ws.tables.get(_TABLE_NAME)
+    if table is None:
+        return
+
+    header_map = get_header_map(ws)
+    sw_col = header_map.get("StableWeeks")
+    if sw_col is None:
+        return
+
+    max_row = ws.max_row
+    new_ref = f"A1:{get_column_letter(sw_col)}{max_row}"
+
+    if table.ref == new_ref:
+        return
+
+    table.ref = new_ref
+
+    # Ensure tableColumns covers all core columns
+    existing_names = {c.name for c in table.tableColumns}
+    for col_name in _TABLE_CORE_COLS:
+        if col_name not in existing_names:
+            col_idx = header_map.get(col_name)
+            if col_idx is not None:
+                table.tableColumns.append(TableColumn(id=col_idx, name=col_name))
+
+    logger.debug("Updated %s ref to %s", _TABLE_NAME, new_ref)
+
+
 # ---------------------------------------------------------------------------
 # Smart-update: stability-based scheduling
 # ---------------------------------------------------------------------------
 
 def _has_missing_scores(ws, ws_row: int, header_map: dict) -> bool:
-    """Return True if any core score column is blank for this row."""
+    """
+    Return True if any core score column is blank AND the row has never been
+    successfully processed (no LastUpdated date).
+
+    Once a row has a LastUpdated date the missing scores are "known unknowns"
+    — the scraper already tried and came up empty.  In that case we let the
+    normal stability schedule decide whether to re-fetch, rather than forcing
+    an update every run.
+    """
+    # If the row has been processed before, missing scores are expected/known
+    lu_col = header_map.get("LastUpdated")
+    if lu_col and ws.cell(row=ws_row, column=lu_col).value is not None:
+        return False
+
+    # Never been processed — check whether any core score is missing
     core_cols = ["Metacritic", "Letterboxd", "IMDB", "TRUE"]
     for col_name in core_cols:
         col_idx = header_map.get(col_name)
@@ -789,6 +926,10 @@ def update_workbook(
     # Ensure all output columns (including LastUpdated, StableWeeks) exist
     header_map = ensure_headers(ws, header_map)
 
+    # Move LastUpdated/StableWeeks inside Table1 if they were previously
+    # written outside it (legacy layout: cols 12-13 instead of 10-11).
+    header_map = migrate_stability_columns(ws, header_map)
+
     today = date.today()
 
     # Collect (worksheet_row_number, title) pairs, skipping blank rows
@@ -831,6 +972,7 @@ def update_workbook(
 
     if not movie_rows:
         logger.info("Nothing to update.")
+        extend_table_to_stability_cols(ws)
         wb.save(output_path)
         return
 
@@ -883,6 +1025,10 @@ def update_workbook(
         # Update stability tracking columns
         is_unchanged = title in manual_unchanged
         update_stability(ws, ws_row, header_map, ns.composite, today, manual_unchanged=is_unchanged)
+
+    # Extend Table1 to cover LastUpdated and StableWeeks so sorting the
+    # table in Excel keeps stability columns aligned with their movie rows.
+    extend_table_to_stability_cols(ws)
 
     wb.save(output_path)
     logger.info("Saved updated workbook to %s", output_path)

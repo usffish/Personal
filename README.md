@@ -109,6 +109,22 @@ st.X[i] = (X[i] − min(X)) / (max(X) − min(X))
 
 `min` and `max` are computed across the entire batch after all fetches complete — not per-movie. This is why the pipeline separates fetching from normalisation. The best movie in each column maps to `1.0`, the worst to `0.0`, and everything else falls proportionally in between.
 
+#### Why min-max and not another normalisation method?
+
+The two common alternatives are **Z-score normalisation** and **rank/percentile normalisation**.
+
+**Z-score** rescales values to mean 0 and standard deviation 1: `z = (x − mean) / std_dev`. The output is unbounded — a movie could score +3.2 or −1.8 — which breaks the composite formula, since a meaningful weighted average requires all inputs to be on a comparable bounded scale. Z-score also assumes a roughly normal distribution, but film scores tend to cluster toward the higher end (most Letterboxd ratings sit between 3.0 and 4.0), so the distribution is skewed and z-score would distort the relative distances between scores.
+
+**Rank/percentile** converts each score to its position in the batch. This discards the magnitude of differences entirely — a Metascore of 95 and one of 80 would be treated as simply "adjacent", regardless of the 15-point gap. For a scoring system, that gap is meaningful information worth preserving.
+
+Min-max is the right fit here for three reasons specific to this problem:
+
+1. **The scales are already meaningful and bounded.** A 95 Metascore genuinely means something different from a 60. Min-max preserves those proportional distances while putting everything on the same unit interval.
+2. **The composite formula requires bounded `[0, 1]` inputs.** The review-count-weighted average only produces an interpretable result if all inputs are on the same scale.
+3. **The global anchors are interpretable.** `Global_Max = 1.0` and `Global_Min = 0.0` represent the best and worst movies in the batch — meaningful reference points. With z-scores or ranks they would be arbitrary numbers.
+
+The one honest tradeoff: min-max is sensitive to outliers. If one movie has an unusually extreme score it compresses everyone else into a narrower band. For a personal watchlist this is unlikely to matter in practice.
+
 ### Step 2 — Review-count-weighted composite
 
 ```
@@ -230,7 +246,10 @@ Place your watchlist in `Movies.xlsx` in the project root. The workbook must hav
 
 - After each fetch, `StableWeeks` increments if the composite changed by ≤ 0.05, or resets to 0 if it changed more.
 - On the next run, a movie is skipped if fewer than `StableWeeks × 7` days have passed since `LastUpdated`.
-- Movies with any missing score are always fetched regardless of stability.
+- Movies that have **never been processed** (no `LastUpdated`) are always fetched.
+- Movies with partial or missing scores that have already been processed are subject to the normal stability schedule — they won't be re-prompted every run just because a source had no data for them.
+
+`LastUpdated` and `StableWeeks` are part of the Excel table (`Table1`), so sorting the workbook in Excel keeps them aligned with the correct movie rows.
 
 ---
 
