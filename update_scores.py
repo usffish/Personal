@@ -998,17 +998,47 @@ def update_workbook(
         raw_scores, failed, manual=manual, existing=existing_scores
     )
 
-    # Pass 2: normalise column-wide (must happen after all fetches complete)
-    normalised = normalise_all(raw_scores)
+    # Build a set of titles that were actually fetched this run (used later to
+    # decide which rows to write back).
+    fetched_titles = {r.title for r in raw_scores}
+
+    # Pass 2: normalise column-wide across ALL movies in the workbook, not just
+    # the ones fetched this run.  When --smart-update skips stable movies, their
+    # existing raw scores must still be included so that min-max scaling uses the
+    # full distribution.  Without this, a small fetch batch collapses to 0/0/0.
+    all_movie_rows_full = []
+    for row in ws.iter_rows(min_row=2, values_only=False):
+        title_cell = row[title_col - 1]
+        t = title_cell.value
+        if t is None or str(t).strip() == "":
+            continue
+        all_movie_rows_full.append((title_cell.row, str(t).strip()))
+
+    # Merge: freshly fetched scores take priority; skipped rows use workbook values.
+    scores_lookup = {r.title: r for r in raw_scores}
+    full_raw: list[RawScores] = []
+    for ws_row_i, title_i in all_movie_rows_full:
+        if title_i in scores_lookup:
+            full_raw.append(scores_lookup[title_i])
+        else:
+            existing = read_existing_scores(ws, ws_row_i, header_map)
+            existing.title = title_i
+            full_raw.append(existing)
+
+    normalised = normalise_all(full_raw)
 
     # Pass 3: compute composite scores
     final_scores = compute_all_composites(normalised)
 
-    # Build lookup: title -> NormalisedScores
+    # Build lookup: title -> NormalisedScores (full batch, for write-back)
     scores_by_title = {ns.title: ns for ns in final_scores}
 
-    # Write results back to workbook rows
+    # Write results back to workbook rows — only rows fetched this run.
+    # Skipped rows already have correct values; re-writing them would also
+    # overwrite their normalised scores with stale single-batch values.
     for ws_row, title in movie_rows:
+        if title not in fetched_titles:
+            continue
         ns = scores_by_title.get(title)
         if ns is None:
             # Movie failed during fetch — leave row unchanged
