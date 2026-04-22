@@ -21,7 +21,7 @@ For every title in a personal `Movies.xlsx` watchlist, the tool:
 
 ## Highlights
 
-- **Three-pass pipeline** — fetch → normalise → composite. Normalisation is intentionally separated from the fetch loop because min-max scaling requires the full column to be known before any single value can be computed.
+- **Three-pass pipeline** — fetch → normalise → composite. Normalisation is intentionally separated from the fetch loop because min-max scaling requires the full column to be known before any single value can be computed. When `--smart-update` skips stable movies, their existing raw scores are still included in the normalisation batch so the full distribution is always used.
 - **Bayesian-motivated weighting** — Metacritic's contribution to the composite scales with its critic review count, not a fixed coefficient. A score backed by 80 reviews carries more weight than the same score backed by 4. This is grounded in Laplace's rule of succession (see [Theory](#composite-score--theory) below).
 - **Dynamic denominator** — missing scores are dropped from both numerator and denominator rather than substituted with zeros, preserving the relative weighting of whichever sources are available.
 - **Resilient scraping** — all HTTP fetches retry up to 3 times with exponential back-off. Per-movie failures are logged and skipped; the rest of the batch continues.
@@ -248,6 +248,7 @@ Place your watchlist in `Movies.xlsx` in the project root. The workbook must hav
 - On the next run, a movie is skipped if fewer than `StableWeeks × 7` days have passed since `LastUpdated`.
 - Movies that have **never been processed** (no `LastUpdated`) are always fetched.
 - Movies with partial or missing scores that have already been processed are subject to the normal stability schedule — they won't be re-prompted every run just because a source had no data for them.
+- Skipped movies still contribute their existing raw scores to the normalisation batch, so min-max scaling always uses the full distribution regardless of how many movies were fetched.
 
 `LastUpdated` and `StableWeeks` are part of the Excel table (`Table1`), so sorting the workbook in Excel keeps them aligned with the correct movie rows.
 
