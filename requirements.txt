@@ -1,8 +1,8 @@
-requests>=2.32.4
+requests==2.32.3
 beautifulsoup4==4.12.3
 openpyxl==3.1.2
 lxml==5.1.0
 tqdm==4.66.2
-pytest>=8.0
-hypothesis>=6.0
+pytest==8.3.2
+hypothesis==6.112.2
 google-generativeai==0.8.3
