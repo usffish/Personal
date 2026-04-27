@@ -45,12 +45,30 @@ def _slugify(text: str) -> str:
     return text
 
 
-def _fetch(url: str, retries: int = 3, backoff: float = 2.0) -> Optional[BeautifulSoup]:
+def _fetch(url: str, retries: int = 3, backoff: float = 2.0,
+           rate_limiter=None, domain: str = "letterboxd.com") -> Optional[BeautifulSoup]:
     """GET a URL and return a BeautifulSoup object, with retry logic and exponential back-off."""
     for attempt in range(retries):
         try:
+            # Wait for rate limiter if provided
+            if rate_limiter:
+                rate_limiter.wait_if_needed(domain)
+            
             resp = SESSION.get(url, timeout=15)
+            
+            # Check for rate limit errors
+            if resp.status_code == 429 or resp.status_code == 503:
+                logger.warning("Letterboxd: Rate limit error HTTP %s for %s", resp.status_code, url)
+                if rate_limiter:
+                    rate_limiter.increase_delay(domain)
+                # Wait longer before retry
+                time.sleep(backoff * (2 ** attempt) * 2)
+                continue
+                
             if resp.status_code == 200:
+                # Success - gradually decrease delay if using rate limiter
+                if rate_limiter and attempt == 0:  # Only on first successful attempt
+                    rate_limiter.decrease_delay(domain)
                 return BeautifulSoup(resp.text, "lxml")
             if resp.status_code == 404:
                 return None
@@ -132,11 +150,11 @@ def _parse_review_count_from_soup(soup: BeautifulSoup) -> Optional[int]:
     return None
 
 
-def _search_for_slug(title: str) -> Optional[str]:
+def _search_for_slug(title: str, rate_limiter=None) -> Optional[str]:
     """Search Letterboxd and return the slug of the best matching film."""
     query = re.sub(r"\s+", "+", title.strip())
     url = _SEARCH_URL.format(query=query)
-    soup = _fetch(url)
+    soup = _fetch(url, rate_limiter=rate_limiter, domain="letterboxd.com")
     if soup is None:
         return None
 
@@ -188,7 +206,8 @@ def _candidate_slugs(title: str, year: Optional[int] = None) -> list:
     return candidates
 
 
-def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None) -> dict:
+def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None, 
+                        rate_limiter=None) -> dict:
     """
     Fetch Letterboxd average rating and rating count for a movie.
 
@@ -207,7 +226,7 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None) -
     # Try each slug candidate in order before falling back to search
     for slug in _candidate_slugs(title, year):
         url = _FILM_URL.format(slug=slug)
-        soup = _fetch(url)
+        soup = _fetch(url, rate_limiter=rate_limiter, domain="letterboxd.com")
         if soup is not None:
             result["url"] = url
             result["rating"] = _parse_rating_from_soup(soup)
@@ -216,10 +235,10 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None) -
 
     # All direct slugs failed — fall back to Letterboxd search
     logger.info("Letterboxd: direct slugs failed for '%s', trying search", title)
-    slug = _search_for_slug(title)
+    slug = _search_for_slug(title, rate_limiter=rate_limiter)
     if slug is not None:
         url = _FILM_URL.format(slug=slug)
-        soup = _fetch(url)
+        soup = _fetch(url, rate_limiter=rate_limiter, domain="letterboxd.com")
         if soup is not None:
             result["url"] = url
             result["rating"] = _parse_rating_from_soup(soup)
@@ -232,7 +251,7 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None) -
         gemini_slug = resolver.resolve_letterboxd_slug(title)
         if gemini_slug:
             url = _FILM_URL.format(slug=gemini_slug)
-            soup = _fetch(url)
+            soup = _fetch(url, rate_limiter=rate_limiter, domain="letterboxd.com")
             if soup is not None:
                 logger.info("Letterboxd: Gemini resolved slug '%s' for '%s'", gemini_slug, title)
                 result["url"] = url

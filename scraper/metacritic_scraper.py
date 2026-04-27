@@ -69,12 +69,30 @@ def _slugify_with_article(text: str) -> str:
     return text
 
 
-def _fetch(url: str, retries: int = 3, backoff: float = 2.5) -> Optional[BeautifulSoup]:
+def _fetch(url: str, retries: int = 3, backoff: float = 2.5, 
+           rate_limiter=None, domain: str = "metacritic.com") -> Optional[BeautifulSoup]:
     """GET a URL and return a BeautifulSoup object, with retry logic and exponential back-off."""
     for attempt in range(retries):
         try:
+            # Wait for rate limiter if provided
+            if rate_limiter:
+                rate_limiter.wait_if_needed(domain)
+            
             resp = SESSION.get(url, timeout=15)
+            
+            # Check for rate limit errors
+            if resp.status_code == 429 or resp.status_code == 503:
+                logger.warning("Metacritic: Rate limit error HTTP %s for %s", resp.status_code, url)
+                if rate_limiter:
+                    rate_limiter.increase_delay(domain)
+                # Wait longer before retry
+                time.sleep(backoff * (2 ** attempt) * 2)
+                continue
+                
             if resp.status_code == 200:
+                # Success - gradually decrease delay if using rate limiter
+                if rate_limiter and attempt == 0:  # Only on first successful attempt
+                    rate_limiter.decrease_delay(domain)
                 return BeautifulSoup(resp.text, "lxml")
             if resp.status_code == 404:
                 return None
@@ -181,7 +199,7 @@ def _search_for_slug(title: str) -> Optional[str]:
     """Search Metacritic and return the slug of the best matching movie."""
     query = re.sub(r"\s+", "%20", title.strip())
     url = _SEARCH_URL.format(query=query)
-    soup = _fetch(url)
+    soup = _fetch(url, rate_limiter=rate_limiter, domain="metacritic.com")
     if soup is None:
         return None
 
@@ -208,7 +226,8 @@ def _search_for_slug(title: str) -> Optional[str]:
     return None
 
 
-def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None) -> dict:
+def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None, 
+                        rate_limiter=None) -> dict:
     """
     Fetch critic review count and Metascore for a movie from Metacritic.
 
@@ -245,7 +264,7 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None) -
 
     for slug in slugs:
         url = _MOVIE_URL.format(slug=slug)
-        soup = _fetch(url)
+        soup = _fetch(url, rate_limiter=rate_limiter, domain="metacritic.com")
         if soup is not None:
             matched_slug = slug
             break
@@ -256,7 +275,7 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None) -
         matched_slug = _search_for_slug(title)
         if matched_slug:
             url = _MOVIE_URL.format(slug=matched_slug)
-            soup = _fetch(url)
+            soup = _fetch(url, rate_limiter=rate_limiter, domain="metacritic.com")
 
     if soup is None and resolver is not None:
         # Last resort: ask Gemini for the correct slug
@@ -264,7 +283,7 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None) -
         gemini_slug = resolver.resolve_metacritic_slug(title)
         if gemini_slug:
             url = _MOVIE_URL.format(slug=gemini_slug)
-            soup = _fetch(url)
+            soup = _fetch(url, rate_limiter=rate_limiter, domain="metacritic.com")
             if soup is not None:
                 matched_slug = gemini_slug
                 logger.info("Metacritic: Gemini resolved slug '%s' for '%s'", gemini_slug, title)
@@ -299,7 +318,7 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None) -
             title,
         )
         reviews_url = _REVIEWS_URL.format(slug=matched_slug)
-        reviews_soup = _fetch(reviews_url)
+        reviews_soup = _fetch(reviews_url, rate_limiter=rate_limiter, domain="metacritic.com")
         if reviews_soup is not None:
             scores = _extract_individual_scores(reviews_soup)
             if scores:

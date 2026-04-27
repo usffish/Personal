@@ -16,6 +16,7 @@ Usage
     python update_scores.py --api-key YOUR_KEY     # OMDb API key
     python update_scores.py --smart-update         # skip recently-stable movies
     python update_scores.py --manual               # prompt for missing values
+    python update_scores.py --random               # process movies in random order
 
 Output columns added / updated
 -------------------------------
@@ -37,10 +38,14 @@ import os
 import random
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
+from queue import Queue
+from threading import Thread, Lock
+import concurrent.futures
 
 import openpyxl
 from dotenv import load_dotenv
@@ -53,6 +58,60 @@ from scraper.gemini_resolver import GeminiResolver
 
 # Load environment variables from .env file (if present)
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Rate Limiter
+# ---------------------------------------------------------------------------
+
+class RateLimiter:
+    """
+    Per-domain rate limiter with adaptive backoff.
+    
+    Tracks request timestamps per domain and enforces minimum delay between requests.
+    Automatically increases delay when rate limit errors (429/503) are detected.
+    """
+    
+    def __init__(self, base_delay: float = 1.0, max_delay: float = 30.0):
+        self.base_delay = base_delay
+        self.max_delay = max_delay
+        self.domain_delays = defaultdict(lambda: base_delay)
+        self.last_request_time = defaultdict(float)
+        self.lock = Lock()
+        
+    def get_delay_for_domain(self, domain: str) -> float:
+        """Get current delay for a domain."""
+        with self.lock:
+            return self.domain_delays[domain]
+    
+    def increase_delay(self, domain: str, factor: float = 2.0):
+        """Increase delay for a domain when rate limit hit."""
+        with self.lock:
+            current = self.domain_delays[domain]
+            new_delay = min(current * factor, self.max_delay)
+            self.domain_delays[domain] = new_delay
+            logger.warning("Rate limit hit for %s, increasing delay to %.1fs", domain, new_delay)
+    
+    def decrease_delay(self, domain: str, factor: float = 0.9, min_delay: float = None):
+        """Gradually decrease delay when no rate limits."""
+        with self.lock:
+            current = self.domain_delays[domain]
+            new_delay = max(current * factor, min_delay or self.base_delay)
+            self.domain_delays[domain] = new_delay
+    
+    def wait_if_needed(self, domain: str):
+        """Wait if needed to respect rate limits."""
+        with self.lock:
+            now = time.time()
+            last = self.last_request_time.get(domain, 0)
+            delay_needed = self.domain_delays[domain]
+            
+            time_since_last = now - last
+            if time_since_last < delay_needed:
+                sleep_time = delay_needed - time_since_last
+                time.sleep(sleep_time)
+            
+            self.last_request_time[domain] = time.time()
+
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -307,6 +366,7 @@ def fetch_all(
     delay: float = 1.0,
     verbose: bool = False,
     resolver=None,
+    rate_limiter=None,
 ) -> tuple[list[RawScores], list[str]]:
     """
     Pass 1: fetch raw scores for all movies.
@@ -334,13 +394,13 @@ def fetch_all(
     for title in tqdm(movies, desc="Fetching scores", unit="movie"):
         logger.info("Fetching: %s", title)
         try:
-            omdb = get_omdb_data(title, api_key, resolver=resolver)
+            omdb = get_omdb_data(title, api_key, resolver=resolver, rate_limiter=rate_limiter)
             time.sleep(delay)
 
-            mc = get_metacritic_data(title, resolver=resolver)
+            mc = get_metacritic_data(title, resolver=resolver, rate_limiter=rate_limiter)
             time.sleep(delay)
 
-            lb = get_letterboxd_data(title, resolver=resolver)
+            lb = get_letterboxd_data(title, resolver=resolver, rate_limiter=rate_limiter)
             time.sleep(delay)
 
             # Prefer the Metascore scraped directly from Metacritic when
@@ -908,6 +968,8 @@ def update_workbook(
     smart_update: bool = False,
     manual: bool = False,
     gemini_key: Optional[str] = None,
+    random_order: bool = False,
+    rate_limit: bool = True,
 ):
     """
     Three-pass pipeline:
@@ -927,6 +989,8 @@ def update_workbook(
 
     When gemini_key is provided, a GeminiResolver is instantiated and passed
     to each scraper as a last-resort fallback for title disambiguation.
+
+    When random_order=True, movies are processed in random order.
     """
     # Build resolver once if a Gemini key was supplied
     resolver = None
@@ -936,6 +1000,13 @@ def update_workbook(
             logger.info("Gemini resolver enabled for slug disambiguation")
         except Exception as exc:
             logger.warning("Could not initialise Gemini resolver: %s", exc)
+    
+    # Create rate limiter for adaptive rate limiting
+    rate_limiter = None
+    if rate_limit:
+        rate_limiter = RateLimiter(base_delay=delay, max_delay=30.0)
+        logger.info("Rate limiter enabled with base delay %.1fs", delay)
+    
     wb, ws = load_workbook_from_path(input_path)
     header_map = get_header_map(ws)
 
@@ -969,9 +1040,15 @@ def update_workbook(
             logger.error("Movie '%s' not found in spreadsheet.", target_movie)
             sys.exit(1)
 
+    # Apply --random filter: shuffle all movies
+    if random_order:
+        random.shuffle(movie_rows)
+
     # Apply --limit filter: pick N movies at random
     if limit:
-        random.shuffle(movie_rows)
+        if not random_order:
+            # If --random wasn't specified, shuffle just for --limit
+            random.shuffle(movie_rows)
         movie_rows = movie_rows[:limit]
 
     # Apply smart-update filter: skip movies that don't need updating yet
@@ -1010,7 +1087,7 @@ def update_workbook(
             existing_scores[title] = prev
 
     # Pass 1: fetch raw scores for all movies
-    raw_scores, failed = fetch_all(movies, api_key=api_key, delay=delay, verbose=verbose, resolver=resolver)
+    raw_scores, failed = fetch_all(movies, api_key=api_key, delay=delay, verbose=verbose, resolver=resolver, rate_limiter=rate_limiter)
 
     # Manual entry: prompt for any values that couldn't be fetched automatically.
     # This happens after all network fetches complete, before normalisation.
@@ -1157,6 +1234,17 @@ def parse_args(argv=None):
             "keys passed as CLI arguments are visible in shell history and process listings."
         )
     )
+    parser.add_argument(
+        "--random", action="store_true", dest="random",
+        help=(
+            "Process movies in random order. "
+            "When combined with --limit, shuffles first then picks N movies."
+        )
+    )
+    parser.add_argument(
+        "--no-rate-limit", action="store_true",
+        help="Disable adaptive rate limiting (use fixed delay only)"
+    )
     return parser.parse_args(argv)
 
 
@@ -1213,6 +1301,8 @@ def main(argv=None):
         smart_update=args.smart_update,
         manual=args.manual,
         gemini_key=gemini_key,
+        random_order=args.random,
+        rate_limit=not args.no_rate_limit,
     )
 
 

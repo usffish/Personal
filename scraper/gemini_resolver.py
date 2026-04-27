@@ -27,9 +27,20 @@ Environment variable
 import logging
 import os
 import re
+import time
+from collections import deque
+from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Model configurations ordered by RPD (highest first) for cycling
+# Format: (model_name, rpm, rpd)
+_GEMINI_MODELS = [
+    ("gemini-3.1-flash-lite", 15, 500),    # Highest RPD
+    ("gemini-2.5-flash-lite", 10, 20),     # Medium
+    ("gemini-3-flash", 5, 20),             # Lowest
+]
 
 # Lazy import so the module can be imported even when google-generativeai is
 # not installed — callers that never instantiate GeminiResolver won't break.
@@ -131,17 +142,27 @@ class GeminiResolver:
 
     Instantiate once per process and reuse across all scraper calls.
     The model is loaded lazily on first use.
+    
+    Includes built-in rate limiting to stay within free tier limits.
     """
 
-    _MODEL_NAME = "gemini-2.5-flash-lite"  # fast, cheap, highest free tier limits
+    _MODEL_NAME = "gemini-3.1-flash-lite"  # 15 RPM, 500 RPD - best free tier limits
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, rpm: int = None, rpd: int = None):
         self._api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not self._api_key:
             raise ValueError(
                 "Gemini API key is required. Pass api_key= or set GEMINI_API_KEY."
             )
         self._model = None  # lazy init
+        
+        # Rate limiting: track request timestamps
+        self._rpm = rpm or _GEMINI_RPM  # requests per minute
+        self._rpd = rpd or _GEMINI_RPD  # requests per day
+        self._minute_requests = deque()  # timestamps of recent requests
+        self._day_requests = deque()     # timestamps of today's requests
+        self._last_rpm_warning = 0       # timestamp of last RPM warning
+        self._last_rpd_warning = 0       # timestamp of last RPD warning
 
     def _get_model(self):
         if self._model is not None:
@@ -152,12 +173,70 @@ class GeminiResolver:
         logger.debug("GeminiResolver: loaded model %s", self._MODEL_NAME)
         return self._model
 
+    def _wait_for_rate_limit(self) -> None:
+        """
+        Wait if necessary to respect RPM and RPD limits.
+        
+        Uses a sliding window approach to track requests.
+        """
+        now = time.time()
+        current_minute = int(now // 60)
+        current_day = int(now // 86400)
+        
+        # Clean up old timestamps (older than 1 minute)
+        while self._minute_requests and self._minute_requests[0] < now - 60:
+            self._minute_requests.popleft()
+        
+        # Clean up old timestamps (older than 1 day)
+        while self._day_requests and self._day_requests[0] < now - 86400:
+            self._day_requests.popleft()
+        
+        # Check RPM limit
+        if len(self._minute_requests) >= self._rpm:
+            # Calculate wait time
+            oldest = self._minute_requests[0]
+            wait_time = 60 - (now - oldest) + 0.1  # +0.1 for safety margin
+            if wait_time > 0:
+                # Only log warning once per minute to avoid spam
+                if now - self._last_rpm_warning > 60:
+                    logger.warning("GeminiResolver: RPM limit reached (%d/min), waiting %.1fs", 
+                                   self._rpm, wait_time)
+                    self._last_rpm_warning = now
+                time.sleep(wait_time)
+                # Clean up again after waiting
+                now = time.time()
+                while self._minute_requests and self._minute_requests[0] < now - 60:
+                    self._minute_requests.popleft()
+        
+        # Check RPD limit
+        if len(self._day_requests) >= self._rpd:
+            oldest = self._day_requests[0]
+            wait_time = 86400 - (now - oldest) + 1
+            if wait_time > 0:
+                if now - self._last_rpd_warning > 3600:  # Only warn once per hour
+                    logger.warning("GeminiResolver: RPD limit reached (%d/day), waiting %.0fs", 
+                                   self._rpd, wait_time)
+                    self._last_rpd_warning = now
+                time.sleep(wait_time)
+                # Clean up again after waiting
+                now = time.time()
+                while self._day_requests and self._day_requests[0] < now - 86400:
+                    self._day_requests.popleft()
+        
+        # Record this request
+        self._minute_requests.append(now)
+        self._day_requests.append(now)
+
     def _ask(self, prompt: str) -> Optional[str]:
         """
         Send a prompt to Gemini and return the stripped response text.
 
         Returns None on any API error or if the model replies "unknown".
+        Includes rate limiting to stay within free tier limits.
         """
+        # Wait for rate limits before making request
+        self._wait_for_rate_limit()
+        
         try:
             model = self._get_model()
             response = model.generate_content(prompt)
