@@ -133,7 +133,7 @@ class GeminiResolver:
     The model is loaded lazily on first use.
     """
 
-    _MODEL_NAME = "gemini-1.5-flash"  # fast, cheap, sufficient for slug lookup
+    _MODEL_NAME = "gemini-2.5-flash-lite"  # fast, cheap, highest free tier limits
 
     def __init__(self, api_key: Optional[str] = None):
         self._api_key = api_key or os.environ.get("GEMINI_API_KEY")
