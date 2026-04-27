@@ -88,14 +88,17 @@ def _parse_imdb_rating(value: Optional[str]) -> Optional[float]:
         return None
 
 
-def get_omdb_data(title: str, api_key: str, year: Optional[int] = None) -> dict:
+def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver=None) -> dict:
     """
     Fetch Metascore and IMDB rating for a movie from the OMDb API.
 
     Args:
-        title:   Movie title.
-        api_key: OMDb API key.
-        year:    Optional release year to improve match accuracy.
+        title:    Movie title.
+        api_key:  OMDb API key.
+        year:     Optional release year to improve match accuracy.
+        resolver: Optional GeminiResolver instance.  When OMDb cannot find the
+                  movie by title, the resolver is asked for the IMDb ID and the
+                  lookup is retried using that ID directly.
 
     Returns:
         dict with keys:
@@ -117,6 +120,22 @@ def get_omdb_data(title: str, api_key: str, year: Optional[int] = None) -> dict:
     # OMDb signals "not found" with Response: "False"
     if data.get("Response") == "False":
         logger.warning("OMDb: movie not found for '%s': %s", title, data.get("Error", ""))
+
+        # Ask Gemini for the IMDb ID and retry with ?i= lookup
+        if resolver is not None:
+            logger.info("OMDb: asking Gemini for IMDb ID for '%s'", title)
+            imdb_id = resolver.resolve_imdb_id(title)
+            if imdb_id:
+                id_params: dict = {"i": imdb_id, "apikey": api_key}
+                id_data = _fetch(_OMDB_URL, id_params)
+                if id_data and id_data.get("Response") != "False":
+                    logger.info("OMDb: Gemini resolved IMDb ID '%s' for '%s'", imdb_id, title)
+                    return {
+                        "metascore": _parse_metascore(id_data.get("Metascore")),
+                        "imdb_rating": _parse_imdb_rating(id_data.get("imdbRating")),
+                        "imdb_id": id_data.get("imdbID") or imdb_id,
+                    }
+
         return dict(_FALLBACK)
 
     return {

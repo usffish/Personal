@@ -208,7 +208,7 @@ def _search_for_slug(title: str) -> Optional[str]:
     return None
 
 
-def get_metacritic_data(title: str, year: Optional[int] = None) -> dict:
+def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None) -> dict:
     """
     Fetch critic review count and Metascore for a movie from Metacritic.
 
@@ -218,9 +218,12 @@ def get_metacritic_data(title: str, year: Optional[int] = None) -> dict:
     each individual score, and returns their rounded average.
 
     Args:
-        title: Movie title.
-        year:  Optional release year (unused in URL construction but kept for
-               API compatibility).
+        title:    Movie title.
+        year:     Optional release year (unused in URL construction but kept for
+                  API compatibility).
+        resolver: Optional GeminiResolver instance.  When all local slug
+                  candidates and the site search have failed, the resolver is
+                  asked for the correct slug as a last resort.
 
     Returns:
         dict with keys:
@@ -248,12 +251,23 @@ def get_metacritic_data(title: str, year: Optional[int] = None) -> dict:
             break
 
     if soup is None:
-        # Fall back to search
+        # Fall back to Metacritic site search
         logger.info("Metacritic: direct slug failed for '%s', trying search", title)
         matched_slug = _search_for_slug(title)
         if matched_slug:
             url = _MOVIE_URL.format(slug=matched_slug)
             soup = _fetch(url)
+
+    if soup is None and resolver is not None:
+        # Last resort: ask Gemini for the correct slug
+        logger.info("Metacritic: site search failed for '%s', asking Gemini", title)
+        gemini_slug = resolver.resolve_metacritic_slug(title)
+        if gemini_slug:
+            url = _MOVIE_URL.format(slug=gemini_slug)
+            soup = _fetch(url)
+            if soup is not None:
+                matched_slug = gemini_slug
+                logger.info("Metacritic: Gemini resolved slug '%s' for '%s'", gemini_slug, title)
 
     if soup is None:
         logger.warning("Metacritic: could not find page for '%s'", title)
@@ -305,11 +319,11 @@ def get_metacritic_data(title: str, year: Optional[int] = None) -> dict:
     return result
 
 
-def get_review_count(title: str, year: Optional[int] = None) -> int:
+def get_review_count(title: str, year: Optional[int] = None, resolver=None) -> int:
     """
     Backward-compatible wrapper around get_metacritic_data.
 
     Returns only the critic review count.  Prefer get_metacritic_data for new
     call sites so that the Metascore is also available.
     """
-    return get_metacritic_data(title, year)["review_count"]
+    return get_metacritic_data(title, year, resolver=resolver)["review_count"]

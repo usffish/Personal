@@ -41,5 +41,12 @@ htmlcov/
 *~
 
 # ── Secrets / environment ─────────────────────────────────────────────────────
+# .env.example is intentionally NOT listed here — it's safe to commit.
 .env
 .env.*
+!.env.example
+secrets.*
+*.key
+*.pem
+*.p12
+*.pfx

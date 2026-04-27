@@ -297,7 +297,8 @@ def test_property9_remaining_movies_processed_after_failure(titles):
         return {"metascore": 70, "imdb_rating": 7.0, "imdb_id": "tt0000001"}
 
     with patch("update_scores.get_omdb_data", side_effect=omdb_side_effect), \
-         patch("update_scores.get_review_count", return_value=10), \
+         patch("update_scores.get_metacritic_data",
+               return_value={"review_count": 10, "metascore": 74}), \
          patch("update_scores.get_letterboxd_data",
                return_value={"rating": 3.5, "rating_count": 100, "url": "http://x"}), \
          patch("update_scores.time.sleep"):

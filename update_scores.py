@@ -48,6 +48,7 @@ from tqdm import tqdm
 from scraper.letterboxd_scraper import get_letterboxd_data
 from scraper.metacritic_scraper import get_metacritic_data
 from scraper.omdb_client import get_omdb_data
+from scraper.gemini_resolver import GeminiResolver
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -301,6 +302,7 @@ def fetch_all(
     api_key: str,
     delay: float = 1.0,
     verbose: bool = False,
+    resolver=None,
 ) -> tuple[list[RawScores], list[str]]:
     """
     Pass 1: fetch raw scores for all movies.
@@ -315,6 +317,9 @@ def fetch_all(
       - Sleeps delay seconds
       - Catches per-movie exceptions, logs title + exception, continues
 
+    When *resolver* is a GeminiResolver instance it is passed to each scraper
+    as a last-resort fallback after all local slug-guessing has failed.
+
     Returns:
         (raw_scores: list[RawScores], failed: list[str])
         where failed contains titles of movies that raised exceptions.
@@ -325,13 +330,13 @@ def fetch_all(
     for title in tqdm(movies, desc="Fetching scores", unit="movie"):
         logger.info("Fetching: %s", title)
         try:
-            omdb = get_omdb_data(title, api_key)
+            omdb = get_omdb_data(title, api_key, resolver=resolver)
             time.sleep(delay)
 
-            mc = get_metacritic_data(title)
+            mc = get_metacritic_data(title, resolver=resolver)
             time.sleep(delay)
 
-            lb = get_letterboxd_data(title)
+            lb = get_letterboxd_data(title, resolver=resolver)
             time.sleep(delay)
 
             # Prefer the Metascore scraped directly from Metacritic when
@@ -898,6 +903,7 @@ def update_workbook(
     verbose: bool = False,
     smart_update: bool = False,
     manual: bool = False,
+    gemini_key: Optional[str] = None,
 ):
     """
     Three-pass pipeline:
@@ -914,7 +920,18 @@ def update_workbook(
     not be fetched automatically.  Existing cell values are never overwritten
     by None — if a scraper returns nothing and the user skips manual entry,
     the previous value in the workbook is preserved.
+
+    When gemini_key is provided, a GeminiResolver is instantiated and passed
+    to each scraper as a last-resort fallback for title disambiguation.
     """
+    # Build resolver once if a Gemini key was supplied
+    resolver = None
+    if gemini_key:
+        try:
+            resolver = GeminiResolver(api_key=gemini_key)
+            logger.info("Gemini resolver enabled for slug disambiguation")
+        except Exception as exc:
+            logger.warning("Could not initialise Gemini resolver: %s", exc)
     wb, ws = load_workbook_from_path(input_path)
     header_map = get_header_map(ws)
 
@@ -989,7 +1006,7 @@ def update_workbook(
             existing_scores[title] = prev
 
     # Pass 1: fetch raw scores for all movies
-    raw_scores, failed = fetch_all(movies, api_key=api_key, delay=delay, verbose=verbose)
+    raw_scores, failed = fetch_all(movies, api_key=api_key, delay=delay, verbose=verbose, resolver=resolver)
 
     # Manual entry: prompt for any values that couldn't be fetched automatically.
     # This happens after all network fetches complete, before normalisation.
@@ -1104,7 +1121,11 @@ def parse_args(argv=None):
     parser.add_argument(
         "--api-key", default=None,
         dest="api_key",
-        help="OMDb API key (overrides OMDB_API_KEY environment variable)"
+        help=(
+            "OMDb API key (overrides OMDB_API_KEY env var). "
+            "Prefer setting OMDB_API_KEY in your environment or .env file — "
+            "keys passed as CLI arguments are visible in shell history and process listings."
+        )
     )
     parser.add_argument(
         "--smart-update", action="store_true", dest="smart_update",
@@ -1119,6 +1140,17 @@ def parse_args(argv=None):
         help=(
             "Prompt for manual entry when scores cannot be fetched automatically. "
             "Existing values in the workbook are preserved when a field is skipped."
+        )
+    )
+    parser.add_argument(
+        "--gemini-key", default=None,
+        dest="gemini_key",
+        help=(
+            "Gemini API key for slug disambiguation (overrides GEMINI_API_KEY env var). "
+            "When provided, Gemini is used as a last-resort fallback when Metacritic, "
+            "Letterboxd, and OMDb cannot find a movie by title. "
+            "Prefer setting GEMINI_API_KEY in your environment or .env file — "
+            "keys passed as CLI arguments are visible in shell history and process listings."
         )
     )
     return parser.parse_args(argv)
@@ -1138,6 +1170,12 @@ def main(argv=None):
             "or pass --api-key."
         )
         sys.exit(1)
+    if args.api_key:
+        logger.warning(
+            "OMDb API key passed via --api-key. "
+            "Prefer setting OMDB_API_KEY in your environment or .env file to "
+            "keep it out of shell history and process listings."
+        )
 
     input_path = Path(args.input)
     if not input_path.exists():
@@ -1151,6 +1189,15 @@ def main(argv=None):
     logger.info("Input:  %s", input_path)
     logger.info("Output: %s", output_path)
 
+    # Resolve Gemini key: --gemini-key first, then GEMINI_API_KEY env var
+    gemini_key = args.gemini_key or os.environ.get("GEMINI_API_KEY")
+    if args.gemini_key:
+        logger.warning(
+            "Gemini API key passed via --gemini-key. "
+            "Prefer setting GEMINI_API_KEY in your environment or .env file to "
+            "keep it out of shell history and process listings."
+        )
+
     update_workbook(
         input_path=input_path,
         output_path=output_path,
@@ -1161,6 +1208,7 @@ def main(argv=None):
         verbose=args.verbose,
         smart_update=args.smart_update,
         manual=args.manual,
+        gemini_key=gemini_key,
     )
 
 

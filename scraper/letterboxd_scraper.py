@@ -188,13 +188,16 @@ def _candidate_slugs(title: str, year: Optional[int] = None) -> list:
     return candidates
 
 
-def get_letterboxd_data(title: str, year: Optional[int] = None) -> dict:
+def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None) -> dict:
     """
     Fetch Letterboxd average rating and rating count for a movie.
 
     Args:
-        title: Movie title.
-        year:  Optional release year — used to try a year-suffixed slug first.
+        title:    Movie title.
+        year:     Optional release year — used to try a year-suffixed slug first.
+        resolver: Optional GeminiResolver instance.  When all local slug
+                  candidates and the site search have failed, the resolver is
+                  asked for the correct slug as a last resort.
 
     Returns:
         dict with keys: rating (float|None), rating_count (int|None), url (str|None)
@@ -211,20 +214,31 @@ def get_letterboxd_data(title: str, year: Optional[int] = None) -> dict:
             result["rating_count"] = _parse_review_count_from_soup(soup)
             return result
 
-    # All direct slugs failed — fall back to search
+    # All direct slugs failed — fall back to Letterboxd search
     logger.info("Letterboxd: direct slugs failed for '%s', trying search", title)
     slug = _search_for_slug(title)
-    if slug is None:
-        logger.warning("Letterboxd: could not find '%s'", title)
-        return result
+    if slug is not None:
+        url = _FILM_URL.format(slug=slug)
+        soup = _fetch(url)
+        if soup is not None:
+            result["url"] = url
+            result["rating"] = _parse_rating_from_soup(soup)
+            result["rating_count"] = _parse_review_count_from_soup(soup)
+            return result
 
-    url = _FILM_URL.format(slug=slug)
-    soup = _fetch(url)
-    if soup is None:
-        logger.warning("Letterboxd: page not found for '%s'", title)
-        return result
+    # Site search also failed — ask Gemini as a last resort
+    if resolver is not None:
+        logger.info("Letterboxd: site search failed for '%s', asking Gemini", title)
+        gemini_slug = resolver.resolve_letterboxd_slug(title)
+        if gemini_slug:
+            url = _FILM_URL.format(slug=gemini_slug)
+            soup = _fetch(url)
+            if soup is not None:
+                logger.info("Letterboxd: Gemini resolved slug '%s' for '%s'", gemini_slug, title)
+                result["url"] = url
+                result["rating"] = _parse_rating_from_soup(soup)
+                result["rating_count"] = _parse_review_count_from_soup(soup)
+                return result
 
-    result["url"] = url
-    result["rating"] = _parse_rating_from_soup(soup)
-    result["rating_count"] = _parse_review_count_from_soup(soup)
+    logger.warning("Letterboxd: could not find '%s'", title)
     return result
