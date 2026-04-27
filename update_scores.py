@@ -43,12 +43,16 @@ from pathlib import Path
 from typing import Optional
 
 import openpyxl
+from dotenv import load_dotenv
 from tqdm import tqdm
 
 from scraper.letterboxd_scraper import get_letterboxd_data
 from scraper.metacritic_scraper import get_metacritic_data
 from scraper.omdb_client import get_omdb_data
 from scraper.gemini_resolver import GeminiResolver
+
+# Load environment variables from .env file (if present)
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Data models
