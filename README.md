@@ -158,13 +158,25 @@ source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
-
-# Set your OMDb API key
-export OMDB_API_KEY=your_key_here
-
-# (Optional) Enable AI-powered slug resolution
-export GEMINI_API_KEY=your_gemini_key_here
 ```
+
+### Environment variables
+
+Copy `.env.example` to `.env` and fill in your API keys:
+
+```bash
+cp .env.example .env
+```
+
+```env
+# Required — OMDb API key (get one free at https://www.omdbapi.com/apikey.aspx)
+OMDB_API_KEY=your_key_here
+
+# Optional — Gemini API key for AI-powered slug resolution
+GEMINI_API_KEY=your_gemini_key_here
+```
+
+The application loads `.env` automatically. You can also set these via environment variables or pass them as CLI flags (`--api-key`, `--gemini-key`).
 
 **Optional:** Set `GEMINI_API_KEY` to enable AI-powered slug resolution for movies that fail to match via local heuristics. This uses the Gemini API to find the correct URL slug for Metacritic, Letterboxd, or the IMDb ID for OMDb — but never asks the AI for scores.
 
