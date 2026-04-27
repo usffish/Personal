@@ -7,6 +7,7 @@ A Python CLI tool that aggregates film scores from OMDb, Metacritic, and Letterb
 ![openpyxl](https://img.shields.io/badge/openpyxl-3776AB?style=flat-square&logo=python&logoColor=white)
 ![pytest](https://img.shields.io/badge/pytest-0A9EDC?style=flat-square&logo=pytest&logoColor=white)
 ![Hypothesis](https://img.shields.io/badge/Hypothesis-3776AB?style=flat-square&logo=python&logoColor=white)
+![Gemini](https://img.shields.io/badge/Gemini_API-4285F4?style=flat-square&logo=google&logoColor=white)
 
 ---
 
@@ -32,6 +33,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 - **Data safety** — existing cell values are never overwritten by a missing result. The input workbook is never modified.
 - **Property-based test suite** — correctness properties (normalisation bounds, composite formula, ZeroDivisionError safety, global anchor computation) are verified with [Hypothesis](https://hypothesis.readthedocs.io/) across hundreds of generated inputs.
 - **Smart scheduling** — --smart-update tracks score stability over time and skips movies that haven't changed, reducing unnecessary network requests on repeat runs.
+- **AI-powered slug resolution** — optional Gemini API integration resolves hard-to-find movie slugs when local heuristics fail, without ever asking the AI for scores.
 
 ---
 
@@ -46,7 +48,8 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 ├── scraper/
 │   ├── omdb_client.py        # OMDb API client — Metascore + IMDB rating
 │   ├── metacritic_scraper.py # Scrapes critic review count (+ Metascore fallback)
-│   └── letterboxd_scraper.py # Scrapes average community rating
+│   ├── letterboxd_scraper.py # Scrapes average community rating
+│   └── gemini_resolver.py    # AI-powered slug resolution (optional)
 └── tests/
     ├── test_omdb_client.py
     ├── test_metacritic_scraper.py
@@ -158,7 +161,12 @@ pip install -r requirements.txt
 
 # Set your OMDb API key
 export OMDB_API_KEY=your_key_here
+
+# (Optional) Enable AI-powered slug resolution
+export GEMINI_API_KEY=your_gemini_key_here
 ```
+
+**Optional:** Set `GEMINI_API_KEY` to enable AI-powered slug resolution for movies that fail to match via local heuristics. This uses the Gemini API to find the correct URL slug for Metacritic, Letterboxd, or the IMDb ID for OMDb — but never asks the AI for scores.
 
 ---
 
@@ -185,6 +193,9 @@ python update_scores.py --manual
 
 # Adjust request delay (default 1.0s between sources)
 python update_scores.py --delay 2.0
+
+# Enable AI-powered slug resolution for hard-to-find movies
+python update_scores.py --gemini-key $GEMINI_API_KEY
 ```
 
 ### All CLI options
@@ -200,6 +211,7 @@ python update_scores.py --delay 2.0
 | --verbose | off | Enable debug-level logging |
 | --smart-update | off | Skip recently-stable movies |
 | --manual | off | Prompt for missing values interactively |
+| --gemini-key KEY | — | Gemini API key for AI slug resolution (overrides GEMINI_API_KEY env var) |
 
 ---
 
@@ -223,6 +235,29 @@ Place your watchlist in Movies.xlsx in the project root. The workbook must have 
 | TRUE | Weighted composite score (0.0–1.0, rounded to 2 dp) |
 | LastUpdated | ISO date of last successful fetch (YYYY-MM-DD) |
 | StableWeeks | Consecutive weeks the composite stayed within ±0.05 |
+
+---
+
+## AI-Powered Slug Resolution
+
+When a movie title doesn't match the URL slug conventions of Metacritic, Letterboxd, or OMDb, the scrapers will fail. The optional `GeminiResolver` uses the Gemini API to resolve the correct slug as a last-resort fallback.
+
+**How it works:**
+1. Local slug heuristics are tried first (lowercase, hyphens, remove articles, etc.)
+2. If that fails, the scraper attempts a search fallback
+3. Only when both fail does GeminiResolver kick in — it asks Gemini for the exact slug or IMDb ID
+4. The AI **never provides scores** — only URL identifiers
+
+**Example:**
+```python
+from scraper import GeminiResolver
+
+resolver = GeminiResolver(api_key="your_gemini_key")
+slug = resolver.resolve_metacritic_slug("Nirvana the Band the Show the Movie")
+# Returns: "nirvana-the-band-the-show-the-movie"
+```
+
+To enable, set `GEMINI_API_KEY` or pass `--gemini-key` on the CLI.
 
 ---
 
