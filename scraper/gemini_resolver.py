@@ -39,9 +39,9 @@ logger = logging.getLogger(__name__)
 # Format: (model_name, rpm, rpd)
 # Note: Using models that work with the current google-generativeai library API
 _GEMINI_MODELS = [
-    ("gemini-3.1-flash-lite-preview", 15, 500),    # Best model - latest preview
-    ("gemini-2.5-flash-lite", 15, 500),            # Good fallback
-    ("gemini-3-flash-preview", 15, 500),           # Third fallback - Gemini 3 flash
+    ("gemini-3.1-flash-lite-preview", 4000, 150_000),  # Tier 1: 4K RPM, 150K RPD
+    ("gemini-2.5-flash-lite",         4000, 999_999),  # Tier 1: 4K RPM, unlimited RPD
+    ("gemini-3-flash-preview",        1000,  10_000),  # Tier 1: 1K RPM, 10K RPD
 ]
 
 # Lazy import so the module can be imported even when google-generativeai is
