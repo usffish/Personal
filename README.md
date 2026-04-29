@@ -274,31 +274,6 @@ slug = resolver.resolve_metacritic_slug("Nirvana the Band the Show the Movie")
 
 To enable, set `GEMINI_API_KEY` or pass `--gemini-key` on the CLI.
 
-### Random Order Processing
-
-The `--random` flag processes movies in random order rather than the default spreadsheet order. This is useful for:
-
-- **Fairness**: When processing large lists, movies at the end don't always get processed last
-- **Testing**: Combined with `--limit`, you can test random subsets of your collection
-- **Variety**: Each run processes movies in a different sequence
-
-**Interaction with `--limit`:**
-- `--random --limit N`: Shuffles all movies, then picks the first N
-- `--limit N` (without `--random`): Also shuffles movies, then picks N (backward compatible)
-- `--random` alone: Processes all movies in random order
-
-**Example:**
-```bash
-# Process all movies in random order
-python update_scores.py --random
-
-# Process 10 random movies (same as --limit 10)
-python update_scores.py --limit 10
-
-# Process 5 movies from a shuffled list
-python update_scores.py --random --limit 5
-```
-
 ---
 
 ## Running the tests

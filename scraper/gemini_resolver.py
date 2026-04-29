@@ -343,6 +343,67 @@ class GeminiResolver:
         raw = self._ask(prompt)
         return _validate_imdb_id(raw)
 
+    def resolve_all_ids(self, title: str) -> dict:
+        """
+        Ask Gemini for all three identifiers (Metacritic slug, Letterboxd slug, IMDb ID)
+        in a single batch request.
+
+        Returns a dict with keys: metacritic_slug, letterboxd_slug, imdb_id
+        Each value is a string or None if not found.
+        """
+        logger.info("GeminiResolver: resolving all IDs for '%s'", title)
+        
+        batch_prompt = f"""\
+I need the URL slugs and IMDb ID for the movie "{title}".
+
+Please provide:
+1. The Metacritic movie slug (e.g., "dark-knight")
+2. The Letterboxd film slug (e.g., "the-dark-knight")
+3. The IMDb ID (e.g., "tt0468569")
+
+Format your response as a JSON object with these exact keys:
+- "metacritic_slug"
+- "letterboxd_slug"  
+- "imdb_id"
+
+If you cannot find a particular identifier, use null for that field.
+Do not include any other text, explanations, or formatting.
+
+Example response format:
+{{
+  "metacritic_slug": "dark-knight",
+  "letterboxd_slug": "the-dark-knight",
+  "imdb_id": "tt0468569"
+}}
+"""
+        
+        raw_response = self._ask(batch_prompt)
+        
+        if not raw_response:
+            return {
+                "metacritic_slug": None,
+                "letterboxd_slug": None,
+                "imdb_id": None,
+            }
+        
+        # Try to parse as JSON
+        try:
+            import json
+            data = json.loads(raw_response)
+            return {
+                "metacritic_slug": _validate_slug(data.get("metacritic_slug")),
+                "letterboxd_slug": _validate_slug(data.get("letterboxd_slug")),
+                "imdb_id": _validate_imdb_id(data.get("imdb_id")),
+            }
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("GeminiResolver: batch response was not valid JSON: %r", raw_response)
+            # Fallback to individual lookups
+            return {
+                "metacritic_slug": self.resolve_metacritic_slug(title),
+                "letterboxd_slug": self.resolve_letterboxd_slug(title),
+                "imdb_id": self.resolve_imdb_id(title),
+            }
+
 
 # ---------------------------------------------------------------------------
 # Validation helpers

@@ -425,6 +425,233 @@ def fetch_all(
     return raw_scores, failed
 
 
+def get_metacritic_data_with_slug(title: str, slug: Optional[str], rate_limiter=None) -> dict:
+    """
+    Fetch Metacritic data using a pre-resolved slug.
+    Returns dict with review_count and metascore.
+    """
+    if not slug:
+        return {"review_count": 0, "metascore": None}
+    
+    from scraper.metacritic_scraper import _fetch, _MOVIE_URL, _REVIEWS_URL, _MIN_REVIEWS_FOR_AGGREGATE
+    from scraper.metacritic_scraper import _extract_review_count, _extract_aggregate_score, _extract_individual_scores
+    
+    result: dict = {"review_count": 0, "metascore": None}
+    
+    url = _MOVIE_URL.format(slug=slug)
+    soup = _fetch(url, rate_limiter=rate_limiter, domain="metacritic.com")
+    
+    if soup is None:
+        return result
+    
+    count = _extract_review_count(soup)
+    if count is not None:
+        result["review_count"] = count
+    
+    if result["review_count"] >= _MIN_REVIEWS_FOR_AGGREGATE:
+        score = _extract_aggregate_score(soup)
+        if score is not None:
+            result["metascore"] = score
+    elif result["review_count"] > 0:
+        reviews_url = _REVIEWS_URL.format(slug=slug)
+        reviews_soup = _fetch(reviews_url, rate_limiter=rate_limiter, domain="metacritic.com")
+        if reviews_soup is not None:
+            from scraper.metacritic_scraper import _extract_individual_scores
+            scores = _extract_individual_scores(reviews_soup)
+            if scores:
+                avg = round(sum(scores) / len(scores))
+                result["metascore"] = max(0, min(100, avg))
+    
+    return result
+
+
+def get_letterboxd_data_with_slug(title: str, slug: Optional[str], rate_limiter=None) -> dict:
+    """
+    Fetch Letterboxd data using a pre-resolved slug.
+    Returns dict with rating and rating_count.
+    """
+    if not slug:
+        return {"rating": None, "rating_count": None, "url": None}
+    
+    from scraper.letterboxd_scraper import _fetch, _FILM_URL, _parse_rating_from_soup, _parse_review_count_from_soup
+    
+    url = _FILM_URL.format(slug=slug)
+    soup = _fetch(url, rate_limiter=rate_limiter, domain="letterboxd.com")
+    
+    if soup is None:
+        return {"rating": None, "rating_count": None, "url": None}
+    
+    return {
+        "rating": _parse_rating_from_soup(soup),
+        "rating_count": _parse_review_count_from_soup(soup),
+        "url": url,
+    }
+
+
+def get_omdb_data_with_id(title: str, api_key: str, imdb_id: Optional[str], rate_limiter=None) -> dict:
+    """
+    Fetch OMDb data using a pre-resolved IMDb ID.
+    Returns dict with metascore, imdb_rating, imdb_id.
+    """
+    if not imdb_id:
+        from scraper.omdb_client import _FALLBACK
+        return dict(_FALLBACK)
+    
+    from scraper.omdb_client import _fetch, _OMDB_URL, _parse_metascore, _parse_imdb_rating
+    
+    params: dict = {"i": imdb_id, "apikey": api_key}
+    data = _fetch(_OMDB_URL, params, rate_limiter=rate_limiter, domain="omdbapi.com")
+    
+    if data is None:
+        from scraper.omdb_client import _FALLBACK
+        return dict(_FALLBACK)
+    
+    if data.get("Response") == "False":
+        from scraper.omdb_client import _FALLBACK
+        return dict(_FALLBACK)
+    
+    return {
+        "metascore": _parse_metascore(data.get("Metascore")),
+        "imdb_rating": _parse_imdb_rating(data.get("imdbRating")),
+        "imdb_id": data.get("imdbID") or imdb_id,
+    }
+
+
+def fetch_with_retry(
+    movies: list[str],
+    api_key: str,
+    delay: float = 1.0,
+    verbose: bool = False,
+    resolver=None,
+    rate_limiter=None,
+) -> tuple[list[RawScores], list[str]]:
+    """
+    Two-pass fetch: first run all scrapers, then retry failed ones with Gemini-resolved slugs.
+    
+    Pass 1: Run all scrapers for all movies
+    Pass 2: For movies that failed, use Gemini to resolve slugs, then retry only the failed scrapers
+    
+    This ensures Gemini only runs once per failed movie (instead of up to 3 times).
+
+    Returns:
+        (raw_scores: list[RawScores], failed: list[str])
+        where failed contains titles of movies that still failed after retry.
+    """
+    raw_scores = []
+    failed = []
+    failed_for_retry = []  # Track which movies need retry
+    
+    # Pass 1: Run all scrapers for all movies
+    for title in tqdm(movies, desc="Fetching scores (pass 1)", unit="movie"):
+        logger.info("Fetching: %s", title)
+        try:
+            omdb = get_omdb_data(title, api_key, resolver=None, rate_limiter=rate_limiter)
+            time.sleep(delay)
+
+            mc = get_metacritic_data(title, resolver=None, rate_limiter=rate_limiter)
+            time.sleep(delay)
+
+            lb = get_letterboxd_data(title, resolver=None, rate_limiter=rate_limiter)
+            time.sleep(delay)
+
+            scraped_metascore = mc.get("metascore")
+            omdb_metascore = omdb.get("metascore") if omdb.get("imdb_id") else None
+            metascore = scraped_metascore if scraped_metascore is not None else omdb_metascore
+
+            raw_scores.append(RawScores(
+                title=title,
+                metascore=metascore,
+                imdb_rating=omdb.get("imdb_rating"),
+                review_count=mc.get("review_count", 0),
+                letterboxd_rating=lb.get("rating"),
+            ))
+            
+            # Check if any scraper failed (no data returned)
+            omdb_failed = omdb.get("imdb_rating") is None
+            mc_failed = mc.get("review_count", 0) == 0 and metascore is None
+            lb_failed = lb.get("rating") is None
+            
+            # Retry with Gemini if ANY scraper failed (not just all 3)
+            if omdb_failed or mc_failed or lb_failed:
+                failed_for_retry.append(title)
+                
+        except Exception as exc:
+            logger.error("Failed to fetch scores for '%s': %s", title, exc)
+            failed.append(title)
+            failed_for_retry.append(title)
+            continue
+
+    # Pass 2: Retry failed movies with Gemini-resolved slugs
+    if failed_for_retry and resolver is not None:
+        logger.info("Retrying %d movie(s) with Gemini slug resolution", len(failed_for_retry))
+        
+        for title in tqdm(failed_for_retry, desc="Retrying with Gemini", unit="movie"):
+            logger.info("Resolving slugs for: %s", title)
+            
+            try:
+                # Get Gemini-resolved slugs in a single batch call
+                gemini_ids = resolver.resolve_all_ids(title)
+                gemini_metacritic_slug = gemini_ids["metacritic_slug"]
+                gemini_letterboxd_slug = gemini_ids["letterboxd_slug"]
+                gemini_imdb_id = gemini_ids["imdb_id"]
+                
+                # Find existing raw scores for this movie
+                existing_idx = next((i for i, r in enumerate(raw_scores) if r.title == title), None)
+                if existing_idx is None:
+                    # Movie wasn't added to raw_scores due to exception - create empty entry
+                    raw_scores.append(RawScores(
+                        title=title,
+                        metascore=None,
+                        imdb_rating=None,
+                        review_count=0,
+                        letterboxd_rating=None,
+                    ))
+                    existing_idx = len(raw_scores) - 1
+                
+                existing = raw_scores[existing_idx]
+                
+                # Retry only the scrapers that failed
+                # Retry OMDb if IMDB rating is None
+                if existing.imdb_rating is None and gemini_imdb_id:
+                    omdb = get_omdb_data_with_id(title, api_key, gemini_imdb_id, rate_limiter=rate_limiter)
+                    imdb_rating = omdb.get("imdb_rating")
+                else:
+                    imdb_rating = existing.imdb_rating
+                
+                # Retry Metacritic if both metascore and review_count are missing
+                if (existing.metascore is None and existing.review_count == 0) and gemini_metacritic_slug:
+                    mc = get_metacritic_data_with_slug(title, gemini_metacritic_slug, rate_limiter=rate_limiter)
+                    metascore = mc.get("metascore")
+                    review_count = mc.get("review_count", 0)
+                else:
+                    metascore = existing.metascore
+                    review_count = existing.review_count
+                
+                # Retry Letterboxd if rating is None
+                if existing.letterboxd_rating is None and gemini_letterboxd_slug:
+                    lb = get_letterboxd_data_with_slug(title, gemini_letterboxd_slug, rate_limiter=rate_limiter)
+                    letterboxd_rating = lb.get("rating")
+                else:
+                    letterboxd_rating = existing.letterboxd_rating
+                
+                # Update existing entry with retried values
+                raw_scores[existing_idx] = RawScores(
+                    title=title,
+                    metascore=metascore,
+                    imdb_rating=imdb_rating,
+                    review_count=review_count,
+                    letterboxd_rating=letterboxd_rating,
+                )
+
+            except Exception as exc:
+                logger.error("Failed to retry '%s' with Gemini: %s", title, exc)
+                if title not in failed:
+                    failed.append(title)
+                continue
+
+    return raw_scores, failed
+
+
 # ---------------------------------------------------------------------------
 # Manual entry helpers
 # ---------------------------------------------------------------------------
@@ -1086,8 +1313,8 @@ def update_workbook(
             prev.title = title
             existing_scores[title] = prev
 
-    # Pass 1: fetch raw scores for all movies
-    raw_scores, failed = fetch_all(movies, api_key=api_key, delay=delay, verbose=verbose, resolver=resolver, rate_limiter=rate_limiter)
+    # Pass 1: fetch raw scores for all movies (with retry for failed movies)
+    raw_scores, failed = fetch_with_retry(movies, api_key=api_key, delay=delay, verbose=verbose, resolver=resolver, rate_limiter=rate_limiter)
 
     # Manual entry: prompt for any values that couldn't be fetched automatically.
     # This happens after all network fetches complete, before normalisation.

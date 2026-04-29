@@ -31,7 +31,7 @@ SESSION.headers.update(HEADERS)
 _OMDB_URL = "http://www.omdbapi.com/"
 
 _FALLBACK = {
-    "metascore": 50,
+    "metascore": None,
     "imdb_rating": None,
     "imdb_id": None,
 }
@@ -95,14 +95,14 @@ def _fetch(url: str, params: dict, retries: int = 3, backoff: float = 2.0,
     return None
 
 
-def _parse_metascore(value: Optional[str]) -> int:
-    """Parse a Metascore string to int; return 50 when value is N/A or missing."""
+def _parse_metascore(value: Optional[str]) -> Optional[int]:
+    """Parse a Metascore string to int; return None when value is N/A or missing."""
     if not value or value == "N/A":
-        return 50
+        return None
     try:
         return int(value)
     except (ValueError, TypeError):
-        return 50
+        return None
 
 
 def _parse_imdb_rating(value: Optional[str]) -> Optional[float]:
@@ -130,7 +130,7 @@ def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver
 
     Returns:
         dict with keys:
-            metascore  (int):         0–100; defaults to 50 when N/A or not found
+            metascore  (int|None):    0–100; None when N/A or not found
             imdb_rating (float|None): 0.0–10.0; None when N/A or not found
             imdb_id     (str|None):   IMDb ID (e.g. "tt0118749"); None when not found
     """

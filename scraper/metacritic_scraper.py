@@ -195,7 +195,7 @@ def _extract_individual_scores(soup: BeautifulSoup) -> list:
     return scores
 
 
-def _search_for_slug(title: str) -> Optional[str]:
+def _search_for_slug(title: str, rate_limiter=None) -> Optional[str]:
     """Search Metacritic and return the slug of the best matching movie."""
     query = re.sub(r"\s+", "%20", title.strip())
     url = _SEARCH_URL.format(query=query)
