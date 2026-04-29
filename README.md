@@ -15,7 +15,10 @@ A Python CLI tool that aggregates film scores from OMDb, Metacritic, and Letterb
 For every title in a personal Movies.xlsx watchlist, the tool:
 
 1. Fetches **Metascore** and **IMDB rating** from the [OMDb API](http://www.omdbapi.com/)
-2. Scrapes **critic review count** (and Metascore fallback) from Metacritic
+2. Scrapes **critic review count** and **Metascore** from Metacritic:
+   - For 4+ reviews: Uses published Metascore
+   - For 1-3 reviews: Averages individual critic scores from the reviews page
+   - For 0 reviews: Returns `None` (no default value)
 3. Scrapes **average community rating** from Letterboxd
 4. Normalises all three scores column-wide using min-max scaling
 5. Computes a **review-count-weighted composite score** grounded in Bayesian statistics
@@ -33,6 +36,8 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 - **Property-based test suite** — correctness properties (normalisation bounds, composite formula, ZeroDivisionError safety, global anchor computation) are verified with [Hypothesis](https://hypothesis.readthedocs.io/) across hundreds of generated inputs.
 - **Smart scheduling** — --smart-update tracks score stability over time and skips movies that haven't changed, reducing unnecessary network requests on repeat runs.
 - **AI-powered slug resolution** — optional Gemini API integration resolves hard-to-find movie slugs when local heuristics fail, without ever asking the AI for scores.
+- **Enhanced Gemini retry** — Gemini now helps with movies that fail ANY scraper (not just all 3), improving coverage for partially missing data.
+- **Accurate Metascore handling** — Returns `None` for N/A scores instead of defaulting to 50, ensuring movies with 1-3 reviews get proper individual score averaging from Metacritic.
 
 ---
 
@@ -262,6 +267,7 @@ When a movie title doesn't match the URL slug conventions of Metacritic, Letterb
 2. If that fails, the scraper attempts a search fallback
 3. Only when both fail does GeminiResolver kick in — it asks Gemini for the exact slug or IMDb ID
 4. The AI **never provides scores** — only URL identifiers
+5. **Enhanced retry logic**: Gemini now helps with movies that fail ANY scraper (not just all 3), improving coverage for partially missing data
 
 **Example:**
 ```python
